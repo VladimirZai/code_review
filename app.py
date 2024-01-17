@@ -1,10 +1,15 @@
 from flask import Flask, abort, request, jsonify
 import elasticsearch as ES
-
 from validate import validate_args
 
-app = Flask(__name__)
+# Конфигурационные параметры, лучше выносить в начало кода или в отдельный модуль
+ELASTICSEARCH_HOST = '192.168.11.128'
+ELASTICSEARCH_PORT = 9200
 
+HOST = '0.0.0.0'
+PORT = 80
+
+app = Flask(__name__)
 
 @app.route('/')
 def index():
@@ -17,23 +22,26 @@ def movie_list():
     if not validate['success']:
         return abort(422)
 
+    '''
+    Можно использовать request.args.get(param, default) сразу для получения параметров запроса,
+    с указанием четкого типа данных, чтобы в случае отсутствия параметров были устновлены
+    параметры по умолчанию со строгой типизацией. Это также делает код более лаконичным
+    '''
     defaults = {
-        'limit': 50,
-        'page': 1,
-        'sort': 'id',
-        'sort_order': 'asc'
+        'limit': int(request.args.get('limit', 50)),
+        'page': int(request.args.get('page', 1)),
+        'sort': request.args.get('sort', 'id'),
+        'sort_order': request.args.get('sort_order', 'asc')
     }
 
-    # Тут уже валидно все
-    for param in request.args.keys():
-        defaults[param] = request.args.get(param)
 
     # Уходит в тело запроса. Если запрос не пустой - мультисерч, если пустой - выдает все фильмы
+    # По заданию, должен быть поиск по полям title, description, genre, actors_names, writers_names и director
     body = {
         "query": {
             "multi_match": {
                 "query": defaults['search'],
-                "fields": ["title"]
+                "fields": ["title", "description", "genre", "actors_names", "writers_names", "director"]
             }
         }
     } if defaults.get('search', False) else {}
@@ -42,7 +50,7 @@ def movie_list():
     body['_source']['include'] = ['id', 'title', 'imdb_rating']
 
     params = {
-        # '_source': ['id', 'title', 'imdb_rating'],
+        # Неиспользуемый код нужно удалять
         'from': int(defaults['limit']) * (int(defaults['page']) - 1),
         'size': defaults['limit'],
         'sort': [
@@ -52,33 +60,38 @@ def movie_list():
         ]
     }
 
-    es_client = ES.Elasticsearch([{'host': '192.168.11.128', 'port': 9200}], )
-    search_res = es_client.search(
-        body=body,
-        index='movies',
-        params=params,
-        filter_path=['hits.hits._source']
-    )
-    es_client.close()
+    # Лучше использовать контекстный менеджер with, чтобы гарантировать, что соединение будет закрыто
+    with ES.Elasticsearch([{'host': ELASTICSEARCH_HOST, 'port': ELASTICSEARCH_PORT}]) as es_client:
+        search_res = es_client.search(
+            body=body,
+            index='movies',
+            params=params,
+            filter_path=['hits.hits._source']
+        )
+
 
     return jsonify([doc['_source'] for doc in search_res['hits']['hits']])
 
 
 @app.route('/api/movies/<string:movie_id>')
 def get_movie(movie_id):
-    es_client = ES.Elasticsearch([{'host': '192.168.11.128', 'port': 9200}], )
-
-    if not es_client.ping():
-        print('oh(')
+    '''
+    Аналогично предыдущим правкам, лучше использовать контекстный менеджер для гарантии закрытия
+    соединения, так как в случае возникновения исключения соединение может быть не закрыто.
+    '''
+    with ES.Elasticsearch([{'host': ELASTICSEARCH_HOST, 'port': ELASTICSEARCH_PORT}]) as es_client:
+        if not es_client.ping():
+            print('Elasticsearch is not available')
+            return abort(500)
 
     search_result = es_client.get(index='movies', id=movie_id, ignore=404)
 
-    es_client.close()
-
-    if search_result['found']:
-        return jsonify(search_result['_source'])
-
-    return abort(404)
+    '''
+    search_result.get('_source', {}) предпочтительнее, так как он предотвращает возможное
+    возникновение исключения KeyError, которое может произойти,
+    если ключ _source отсутствует в search_result. Такой подход более безопасный.
+    '''
+    return jsonify(search_result.get('_source', {})) if search_result['found'] else abort(404)
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=80)
+    app.run(host=HOST, port=PORT)
